@@ -1,22 +1,57 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
-## Getting Started
+## 概要
 
-First, run the development server:
+Product Hunt API を使用して投稿一覧を表示し、CSV ファイルとしてダウンロードできるアプリケーションです。
+
+## セットアップ
+
+### 1. 依存関係のインストール
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
+```
+
+### 2. 環境変数の設定
+
+`.env.local` ファイルをプロジェクトルートに作成し、以下の環境変数を設定してください：
+
+```env
+# Product Hunt API
+PRODUCT_HUNT_ACCESS_TOKEN=your_product_hunt_access_token_here
+```
+
+#### Product Hunt API アクセストークンの取得方法
+
+**方法 1: 開発者トークン（推奨）**
+
+1. [Product Hunt API ダッシュボード](https://www.producthunt.com/developers) にアクセス
+2. アプリケーションを作成または選択
+3. ダッシュボードから「開発者トークン（Developer Token）」を取得（期限なし）
+4. `.env.local` の `PRODUCT_HUNT_ACCESS_TOKEN` に設定
+
+**方法 2: OAuth2 クライアント認証（公開データのみ）**
+
+公開データのみにアクセスする場合、以下のコマンドでトークンを取得できます：
+
+```bash
+curl --header "Content-Type: application/json" \
+  --request POST \
+  --data '{"client_id":"YOUR_CLIENT_ID","client_secret":"YOUR_CLIENT_SECRET","grant_type":"client_credentials"}' \
+  https://api.producthunt.com/v2/oauth/token
+```
+
+取得した `access_token` を `.env.local` の `PRODUCT_HUNT_ACCESS_TOKEN` に設定してください。
+
+**注意**: トークンが無効な場合は、上記の方法で新しいトークンを取得してください。
+
+### 3. 開発サーバーの起動
+
+```bash
 pnpm dev
-# or
-bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
