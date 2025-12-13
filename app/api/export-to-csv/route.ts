@@ -6,6 +6,17 @@ import type {
 
 const PRODUCT_HUNT_API_URL = "https://api.producthunt.com/v2/api/graphql";
 
+type GraphQLError = { message?: string };
+type PostsQueryResponse = {
+  data?: {
+    posts?: {
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+      edges?: ProductHuntResponse["data"]["posts"]["edges"];
+    };
+  };
+  errors?: GraphQLError[];
+};
+
 const GET_POSTS_QUERY = `
   query GetPosts($first: Int!, $after: String) {
     posts(first: $first, after: $after) {
@@ -74,12 +85,15 @@ export async function POST(request: Request) {
     const dateEnd = new Date(selectedDate);
     dateEnd.setUTCHours(23, 59, 59, 999);
 
-    // 全ての投稿を取得（ページネーション）
-    const allPosts: ProductHuntResponse["data"]["posts"]["edges"] = [];
+    // 取得しながら対象日付に絞り込み（不要な全件保持/後段フィルタを避ける）
+    const filteredPosts: ProductHuntResponse["data"]["posts"]["edges"] = [];
     let hasNextPage = true;
     let cursor: string | null = null;
     let requestCount = 0;
     const maxRequests = 100; // 安全のための上限
+    // featuredAt の降順ソートが成立している場合に限り、対象日より古いページに到達したら早期終了する
+    let olderPageStreak = 0;
+    const maxOlderPagesBeforeStop = 2;
 
     // レート制限情報を追跡
     let rateLimitLimit = 6250; // デフォルト値（GraphQLエンドポイントの複雑度制限）
@@ -151,20 +165,30 @@ export async function POST(request: Request) {
         );
       }
 
-      const productHuntData: any = await productHuntResponse.json();
+      const productHuntData =
+        (await productHuntResponse.json()) as PostsQueryResponse;
 
       if (productHuntData.errors) {
         const errorMessage = productHuntData.errors
-          .map((e: any) => e.message || "Unknown error")
+          .map((e) => e.message || "Unknown error")
           .join("; ");
         throw new Error(`Product Hunt API error: ${errorMessage}`);
       }
 
       const posts = productHuntData.data?.posts?.edges || [];
-      allPosts.push(...posts);
+      // 取得したページ内で日付範囲に入る投稿のみ収集
+      for (const edge of posts) {
+        const post = edge?.node;
+        if (!post?.featuredAt) continue;
+        const featuredDate = new Date(post.featuredAt);
+        if (featuredDate >= dateStart && featuredDate <= dateEnd) {
+          filteredPosts.push(edge);
+        }
+      }
 
       // ページネーション情報を更新
-      hasNextPage = productHuntData.data?.posts?.pageInfo?.hasNextPage || false;
+      hasNextPage =
+        productHuntData.data?.posts?.pageInfo?.hasNextPage || false;
       cursor = productHuntData.data?.posts?.pageInfo?.endCursor || null;
 
       // 無限ループを防ぐため、十分なデータが取得できた場合は終了
@@ -173,43 +197,56 @@ export async function POST(request: Request) {
         break;
       }
 
-      // レート制限に基づいて動的に待機時間を調整
+      // featuredAt の並びが降順っぽい場合のみ、対象日より古いページに到達したら早期終了
+      let firstFeaturedAtMs: number | null = null;
+      let lastFeaturedAtMs: number | null = null;
+      for (let i = 0; i < posts.length; i++) {
+        const featuredAt = posts[i]?.node?.featuredAt;
+        if (!featuredAt) continue;
+        const ms = Date.parse(featuredAt);
+        if (Number.isNaN(ms)) continue;
+        if (firstFeaturedAtMs === null) firstFeaturedAtMs = ms;
+        lastFeaturedAtMs = ms;
+      }
+      const orderingLooksDesc =
+        firstFeaturedAtMs !== null &&
+        lastFeaturedAtMs !== null &&
+        firstFeaturedAtMs >= lastFeaturedAtMs;
+      if (orderingLooksDesc && lastFeaturedAtMs !== null) {
+        if (lastFeaturedAtMs < dateStart.getTime()) {
+          olderPageStreak++;
+        } else {
+          olderPageStreak = 0;
+        }
+        if (olderPageStreak >= maxOlderPagesBeforeStop) {
+          break;
+        }
+      } else {
+        olderPageStreak = 0;
+      }
+
+      // レート制限に基づいて動的に待機時間を調整（固定1秒待機を撤廃）
       if (hasNextPage) {
-        // 残りクォータが10%以下の場合、リセット時間まで待機するか、待機時間を長くする
-        const remainingPercentage = (rateLimitRemaining / rateLimitLimit) * 100;
+        const remainingPercentage =
+          rateLimitLimit > 0 ? (rateLimitRemaining / rateLimitLimit) * 100 : 0;
+        let waitMs = 0;
 
         if (remainingPercentage <= 5) {
-          // 残りクォータが5%以下の場合、リセット時間まで待機
-          if (rateLimitReset > 0) {
-            await new Promise((resolve) =>
-              setTimeout(resolve, rateLimitReset * 1000)
-            );
-          } else {
-            // リセット時間が不明な場合、長めに待機（15分 = 900秒）
-            await new Promise((resolve) => setTimeout(resolve, 900000));
-          }
+          waitMs = rateLimitReset > 0 ? rateLimitReset * 1000 : 900000;
         } else if (remainingPercentage <= 10) {
-          // 残りクォータが10%以下の場合、待機時間を長くする（5秒）
-          await new Promise((resolve) => setTimeout(resolve, 5000));
+          waitMs = 5000;
         } else if (remainingPercentage <= 20) {
-          // 残りクォータが20%以下の場合、待機時間を少し長くする（2秒）
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+          waitMs = 2000;
         } else {
-          // 残りクォータが十分な場合、最小限の待機時間（1秒）
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          // クォータが十分な場合は最小限（マナーとしてごく短い待機）
+          waitMs = 150;
+        }
+
+        if (waitMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
         }
       }
     }
-
-    // 選択された日付でフィルタリング
-    const filteredPosts = allPosts.filter((edge) => {
-      const post = edge.node;
-      if (!post.featuredAt) {
-        return false;
-      }
-      const featuredDate = new Date(post.featuredAt);
-      return featuredDate >= dateStart && featuredDate <= dateEnd;
-    });
 
     if (filteredPosts.length === 0) {
       return NextResponse.json(

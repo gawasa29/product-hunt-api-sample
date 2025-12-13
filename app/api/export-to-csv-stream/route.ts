@@ -3,6 +3,38 @@ import type { ProductHuntResponse, ProductHuntMaker } from "@/types/product-hunt
 
 const PRODUCT_HUNT_API_URL = "https://api.producthunt.com/v2/api/graphql";
 
+type GraphQLError = { message?: string };
+type PostsQueryResponse = {
+  data?: {
+    posts?: {
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+      edges?: ProductHuntResponse["data"]["posts"]["edges"];
+    };
+  };
+  errors?: GraphQLError[];
+};
+
+type ProgressEvent = {
+  type:
+    | "start"
+    | "progress"
+    | "waiting"
+    | "filtering"
+    | "generating"
+    | "complete"
+    | "error";
+  message: string;
+  requestCount?: number;
+  totalPosts?: number;
+  waitSeconds?: number;
+  rateLimitRemaining?: number;
+  rateLimitLimit?: number;
+  filteredCount?: number;
+  filename?: string;
+  csvData?: string;
+  selectedDate?: string;
+};
+
 const GET_POSTS_QUERY = `
   query GetPosts($first: Int!, $after: String) {
     posts(first: $first, after: $after) {
@@ -55,7 +87,7 @@ export async function POST(request: Request) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      const sendProgress = (data: any) => {
+      const sendProgress = (data: ProgressEvent) => {
         const message = `data: ${JSON.stringify(data)}\n\n`;
         controller.enqueue(encoder.encode(message));
       };
@@ -84,11 +116,17 @@ export async function POST(request: Request) {
         const dateEnd = new Date(selectedDate);
         dateEnd.setUTCHours(23, 59, 59, 999);
 
-        const allPosts: Array<{ node: any }> = [];
+        // 取得しながら対象日付に絞り込み（不要な全件取得/後段フィルタを避ける）
+        type PostEdge = ProductHuntResponse["data"]["posts"]["edges"][number];
+        const filteredPosts: PostEdge[] = [];
+        let processedPosts = 0;
         let hasNextPage = true;
         let cursor: string | null = null;
         let requestCount = 0;
         const maxRequests = 100;
+        // featuredAt の降順ソートが成立している場合に限り、対象日より古いページに到達したら早期終了する
+        let olderPageStreak = 0;
+        const maxOlderPagesBeforeStop = 2;
 
         let rateLimitLimit = 6250;
         let rateLimitRemaining = 6250;
@@ -101,9 +139,10 @@ export async function POST(request: Request) {
             type: "progress",
             message: `リクエスト ${requestCount} を送信中...`,
             requestCount,
-            totalPosts: allPosts.length,
+            totalPosts: processedPosts,
             rateLimitRemaining,
             rateLimitLimit,
+            filteredCount: filteredPosts.length,
           });
 
           const productHuntResponse = await fetch(PRODUCT_HUNT_API_URL, {
@@ -180,17 +219,28 @@ export async function POST(request: Request) {
             );
           }
 
-          const productHuntData: any = await productHuntResponse.json();
+          const productHuntData =
+            (await productHuntResponse.json()) as PostsQueryResponse;
 
           if (productHuntData.errors) {
             const errorMessage = productHuntData.errors
-              .map((e: any) => e.message || "Unknown error")
+              .map((e) => e.message || "Unknown error")
               .join("; ");
             throw new Error(`Product Hunt API error: ${errorMessage}`);
           }
 
           const posts = productHuntData.data?.posts?.edges || [];
-          allPosts.push(...posts);
+          processedPosts += posts.length;
+
+          // 取得したページ内で日付範囲に入る投稿のみ収集
+          for (const edge of posts) {
+            const post = edge.node;
+            if (!post.featuredAt) continue;
+            const featuredDate = new Date(post.featuredAt);
+            if (featuredDate >= dateStart && featuredDate <= dateEnd) {
+              filteredPosts.push(edge);
+            }
+          }
 
           hasNextPage =
             productHuntData.data?.posts?.pageInfo?.hasNextPage || false;
@@ -200,29 +250,72 @@ export async function POST(request: Request) {
             break;
           }
 
+          // featuredAt の並びが降順っぽい場合のみ、対象日より古いページに到達したら早期終了
+          let firstFeaturedAtMs: number | null = null;
+          let lastFeaturedAtMs: number | null = null;
+          for (let i = 0; i < posts.length; i++) {
+            const featuredAt = posts[i]?.node?.featuredAt;
+            if (!featuredAt) continue;
+            const ms = Date.parse(featuredAt);
+            if (Number.isNaN(ms)) continue;
+            if (firstFeaturedAtMs === null) firstFeaturedAtMs = ms;
+            lastFeaturedAtMs = ms;
+          }
+          const orderingLooksDesc =
+            firstFeaturedAtMs !== null &&
+            lastFeaturedAtMs !== null &&
+            firstFeaturedAtMs >= lastFeaturedAtMs;
+          if (orderingLooksDesc && lastFeaturedAtMs !== null) {
+            if (lastFeaturedAtMs < dateStart.getTime()) {
+              olderPageStreak++;
+            } else {
+              olderPageStreak = 0;
+            }
+            if (olderPageStreak >= maxOlderPagesBeforeStop) {
+              sendProgress({
+                type: "progress",
+                message:
+                  "対象日より古いページに到達したため、残りページの取得を省略します",
+                requestCount,
+                totalPosts: processedPosts,
+                filteredCount: filteredPosts.length,
+              });
+              break;
+            }
+          } else {
+            olderPageStreak = 0;
+          }
+
+          // レート制限に基づいて動的に待機時間を調整（固定1秒待機を撤廃）
           if (hasNextPage) {
             const remainingPercentage =
-              (rateLimitRemaining / rateLimitLimit) * 100;
-            let waitSeconds = 1;
+              rateLimitLimit > 0 ? (rateLimitRemaining / rateLimitLimit) * 100 : 0;
+            let waitMs = 0;
 
             if (remainingPercentage <= 5) {
-              waitSeconds = rateLimitReset > 0 ? rateLimitReset : 900;
+              waitMs = rateLimitReset > 0 ? rateLimitReset * 1000 : 900000;
             } else if (remainingPercentage <= 10) {
-              waitSeconds = 5;
+              waitMs = 5000;
             } else if (remainingPercentage <= 20) {
-              waitSeconds = 2;
+              waitMs = 2000;
+            } else {
+              // クォータが十分な場合は最小限（マナーとしてごく短い待機）
+              waitMs = 150;
             }
 
-            if (waitSeconds > 1) {
+            if (waitMs >= 1000) {
+              const waitSeconds = Math.ceil(waitMs / 1000);
               sendProgress({
                 type: "waiting",
                 message: `次のリクエストまで${waitSeconds}秒待機中... (残りクォータ: ${rateLimitRemaining}/${rateLimitLimit})`,
                 waitSeconds,
                 rateLimitRemaining,
                 rateLimitLimit,
+                requestCount,
+                totalPosts: processedPosts,
+                filteredCount: filteredPosts.length,
               });
 
-              // 待機中に進捗を更新（1秒ごと）
               for (let i = waitSeconds; i > 0; i--) {
                 await new Promise((resolve) => setTimeout(resolve, 1000));
                 sendProgress({
@@ -231,10 +324,13 @@ export async function POST(request: Request) {
                   waitSeconds: i,
                   rateLimitRemaining,
                   rateLimitLimit,
+                  requestCount,
+                  totalPosts: processedPosts,
+                  filteredCount: filteredPosts.length,
                 });
               }
-            } else {
-              await new Promise((resolve) => setTimeout(resolve, 1000));
+            } else if (waitMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, waitMs));
             }
           }
         }
@@ -242,16 +338,8 @@ export async function POST(request: Request) {
         sendProgress({
           type: "filtering",
           message: "日付でフィルタリング中...",
-          totalPosts: allPosts.length,
-        });
-
-        const filteredPosts = allPosts.filter((edge) => {
-          const post = edge.node;
-          if (!post.featuredAt) {
-            return false;
-          }
-          const featuredDate = new Date(post.featuredAt);
-          return featuredDate >= dateStart && featuredDate <= dateEnd;
+          totalPosts: processedPosts,
+          filteredCount: filteredPosts.length,
         });
 
         if (filteredPosts.length === 0) {
@@ -282,7 +370,10 @@ export async function POST(request: Request) {
 
         const rows = filteredPosts.map((edge) => {
           const post = edge.node;
-          const makers = (Array.isArray(post.makers) ? post.makers : []).map((maker: any) => maker?.name || "").filter(Boolean).join(", ");
+          const makers = (post.makers || [])
+            .map((maker: ProductHuntMaker) => maker.name)
+            .filter(Boolean)
+            .join(", ");
           const user = post.user ? post.user.name : "";
 
           return [
