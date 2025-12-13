@@ -68,14 +68,57 @@ export default function Home() {
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
+        }
+
+        if (done) {
+          // ストリームが終了したら、バッファに残っているデータを処理
+          const lines = buffer.split("\n");
+          for (const line of lines) {
+            if (line.trim() && line.startsWith("data: ")) {
+              try {
+                const data: ProgressData = JSON.parse(line.slice(6));
+                setProgress(data);
+
+                if (data.type === "error") {
+                  setExportError(data.message);
+                  setIsExporting(false);
+                  return;
+                }
+
+                if (data.type === "complete" && data.csvData && data.filename) {
+                  // CSVファイルをダウンロード
+                  const blob = new Blob([data.csvData], {
+                    type: "text/csv; charset=utf-8",
+                  });
+                  const url = window.URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = data.filename;
+                  document.body.appendChild(a);
+                  a.click();
+                  window.URL.revokeObjectURL(url);
+                  document.body.removeChild(a);
+                  setIsExporting(false);
+                  setProgress(null);
+                  return;
+                }
+              } catch (e) {
+                console.error("Failed to parse progress data:", e);
+              }
+            }
+          }
+          break;
+        }
+
+        // ストリーム継続中は、完全な行のみを処理
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-          if (line.startsWith("data: ")) {
+          if (line.trim() && line.startsWith("data: ")) {
             try {
               const data: ProgressData = JSON.parse(line.slice(6));
               setProgress(data);
