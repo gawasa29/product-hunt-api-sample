@@ -13,9 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Product Hunt API Sample",
-  description:
-    "Product Hunt の投稿一覧を表示し、Google スプレッドシートに出力するアプリケーション",
+  title: "Product Hunt CSV ダウンロード",
+  description: "Product Hunt の投稿データを CSV ファイルとしてダウンロード",
 };
 
 export default function RootLayout({

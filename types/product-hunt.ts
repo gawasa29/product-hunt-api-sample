@@ -16,11 +16,20 @@ export interface ProductHuntProduct {
   createdAt: string;
 }
 
+export interface ProductHuntUser {
+  name: string;
+  username: string;
+}
+
 export interface ProductHuntPost {
   id: string;
   name: string;
   tagline: string;
   url: string;
+  description?: string;
+  website?: string;
+  featuredAt?: string;
+  user?: ProductHuntUser;
   votesCount: number;
   commentsCount: number;
   createdAt: string;
