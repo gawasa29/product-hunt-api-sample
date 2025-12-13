@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import type { ProductHuntResponse } from "@/types/product-hunt";
+import type {
+  ProductHuntResponse,
+  ProductHuntMaker,
+} from "@/types/product-hunt";
 
 const PRODUCT_HUNT_API_URL = "https://api.producthunt.com/v2/api/graphql";
 
@@ -72,7 +75,7 @@ export async function POST(request: Request) {
     dateEnd.setUTCHours(23, 59, 59, 999);
 
     // 全ての投稿を取得（ページネーション）
-    const allPosts: any[] = [];
+    const allPosts: ProductHuntResponse["data"]["posts"]["edges"] = [];
     let hasNextPage = true;
     let cursor: string | null = null;
     let requestCount = 0;
@@ -232,7 +235,9 @@ export async function POST(request: Request) {
     // データ行を準備
     const rows = filteredPosts.map((edge) => {
       const post = edge.node;
-      const makers = post.makers.map((maker) => maker.name).join(", ");
+      const makers = post.makers
+        .map((maker: ProductHuntMaker) => maker.name)
+        .join(", ");
       const user = post.user ? post.user.name : "";
 
       return [

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { ProductHuntResponse } from "@/types/product-hunt";
+import type { ProductHuntResponse, ProductHuntMaker } from "@/types/product-hunt";
 
 const PRODUCT_HUNT_API_URL = "https://api.producthunt.com/v2/api/graphql";
 
@@ -84,7 +84,7 @@ export async function POST(request: Request) {
         const dateEnd = new Date(selectedDate);
         dateEnd.setUTCHours(23, 59, 59, 999);
 
-        const allPosts: any[] = [];
+        const allPosts: Array<{ node: any }> = [];
         let hasNextPage = true;
         let cursor: string | null = null;
         let requestCount = 0;
@@ -282,7 +282,7 @@ export async function POST(request: Request) {
 
         const rows = filteredPosts.map((edge) => {
           const post = edge.node;
-          const makers = post.makers.map((maker) => maker.name).join(", ");
+          const makers = (Array.isArray(post.makers) ? post.makers : []).map((maker: any) => maker?.name || "").filter(Boolean).join(", ");
           const user = post.user ? post.user.name : "";
 
           return [
