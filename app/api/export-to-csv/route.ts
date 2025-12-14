@@ -26,12 +26,12 @@ const GET_POSTS_QUERY = `
       }
       edges {
         node {
-          id
           name
           tagline
           url
           description
           website
+          votesCount
           makers {
             name
             username
@@ -188,6 +188,8 @@ export async function POST(request: Request) {
       "makers",
       "description",
       "website",
+      "votesCount",
+      "content",
     ];
 
     // データ行を準備
@@ -204,6 +206,8 @@ export async function POST(request: Request) {
         makers || "",
         post.description || "",
         post.website || "",
+        post.votesCount?.toString() || "0",
+        "", // content - 後のAI処理で使用するため空で保持
       ];
     });
 
