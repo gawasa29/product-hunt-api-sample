@@ -32,11 +32,6 @@ const GET_POSTS_QUERY = `
           url
           description
           website
-          featuredAt
-          user {
-            name
-            username
-          }
           makers {
             name
             username
@@ -193,8 +188,6 @@ export async function POST(request: Request) {
       "makers",
       "description",
       "website",
-      "featuredAt",
-      "user",
     ];
 
     // データ行を準備
@@ -203,7 +196,6 @@ export async function POST(request: Request) {
       const makers = post.makers
         .map((maker: ProductHuntMaker) => maker.name)
         .join(", ");
-      const user = post.user ? post.user.name : "";
 
       return [
         post.name || "",
@@ -212,10 +204,6 @@ export async function POST(request: Request) {
         makers || "",
         post.description || "",
         post.website || "",
-        post.featuredAt
-          ? new Date(post.featuredAt).toLocaleString("ja-JP")
-          : "",
-        user,
       ];
     });
 
