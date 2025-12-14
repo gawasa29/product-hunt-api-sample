@@ -18,8 +18,8 @@ type PostsQueryResponse = {
 };
 
 const GET_POSTS_QUERY = `
-  query GetPosts($first: Int!, $after: String) {
-    posts(first: $first, after: $after) {
+  query GetPosts($first: Int!, $after: String, $postedAfter: DateTime, $postedBefore: DateTime) {
+    posts(first: $first, after: $after, postedAfter: $postedAfter, postedBefore: $postedBefore) {
       pageInfo {
         hasNextPage
         endCursor
@@ -68,7 +68,6 @@ export async function POST(request: Request) {
   }
 
   try {
-    // リクエストボディから日付を取得
     const body = await request.json().catch(() => ({}));
     const selectedDate = body.date;
 
@@ -79,31 +78,23 @@ export async function POST(request: Request) {
       );
     }
 
-    // 選択された日付の開始時刻と終了時刻を計算（UTC）
     const dateStart = new Date(selectedDate);
     dateStart.setUTCHours(0, 0, 0, 0);
     const dateEnd = new Date(selectedDate);
     dateEnd.setUTCHours(23, 59, 59, 999);
 
-    // 取得しながら対象日付に絞り込み（不要な全件保持/後段フィルタを避ける）
-    const filteredPosts: ProductHuntResponse["data"]["posts"]["edges"] = [];
-    let hasNextPage = true;
-    let cursor: string | null = null;
-    let requestCount = 0;
-    const maxRequests = 100; // 安全のための上限
-    // featuredAt の降順ソートが成立している場合に限り、対象日より古いページに到達したら早期終了する
-    let olderPageStreak = 0;
-    const maxOlderPagesBeforeStop = 2;
+    // ISO 8601形式に変換
+    const postedAfter = dateStart.toISOString();
+    const postedBefore = dateEnd.toISOString();
 
-    // レート制限情報を追跡
-    let rateLimitLimit = 6250; // デフォルト値（GraphQLエンドポイントの複雑度制限）
-    let rateLimitRemaining = 6250;
-    let rateLimitReset = 0;
+    // APIリクエスト関数（リトライ回数制限付き）
+    const fetchPosts = async (
+      cursor: string | null = null,
+      retryCount = 0
+    ): Promise<Response> => {
+      const MAX_RETRIES = 3; // 最大リトライ回数
 
-    while (hasNextPage && requestCount < maxRequests) {
-      requestCount++;
-
-      const productHuntResponse = await fetch(PRODUCT_HUNT_API_URL, {
+      const response = await fetch(PRODUCT_HUNT_API_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -112,59 +103,49 @@ export async function POST(request: Request) {
         body: JSON.stringify({
           query: GET_POSTS_QUERY,
           variables: {
-            first: 50, // 一度に取得する件数
+            first: 20, // Product Hunt APIの最大値は20件
             after: cursor,
+            postedAfter,
+            postedBefore,
           },
         }),
       });
 
-      // レート制限ヘッダーを取得（参考: https://api.producthunt.com/v2/docs/rate_limits/headers）
-      const rateLimitLimitHeader =
-        productHuntResponse.headers.get("X-Rate-Limit-Limit");
-      const rateLimitRemainingHeader = productHuntResponse.headers.get(
-        "X-Rate-Limit-Remaining"
-      );
-      const rateLimitResetHeader =
-        productHuntResponse.headers.get("X-Rate-Limit-Reset");
+      if (!response.ok) {
+        if (response.status === 429 && retryCount < MAX_RETRIES) {
+          const retryAfter = response.headers.get("retry-after");
+          const rateLimitReset = response.headers.get("X-Rate-Limit-Reset");
+          const waitSeconds = retryAfter
+            ? parseInt(retryAfter, 10)
+            : rateLimitReset
+            ? parseInt(rateLimitReset, 10)
+            : 60;
 
-      if (rateLimitLimitHeader) {
-        rateLimitLimit = parseInt(rateLimitLimitHeader, 10);
-      }
-      if (rateLimitRemainingHeader) {
-        rateLimitRemaining = parseInt(rateLimitRemainingHeader, 10);
-      }
-      if (rateLimitResetHeader) {
-        rateLimitReset = parseInt(rateLimitResetHeader, 10);
-      }
+          // 最大待機時間を30秒に制限（タイムアウト対策）
+          const actualWaitSeconds = Math.min(waitSeconds, 30);
 
-      if (!productHuntResponse.ok) {
-        // レート制限エラーの場合、retry-afterヘッダーまたはX-Rate-Limit-Resetを確認して待機
-        if (productHuntResponse.status === 429) {
-          const retryAfter = productHuntResponse.headers.get("retry-after");
-          let waitSeconds = 0;
-
-          if (retryAfter) {
-            waitSeconds = parseInt(retryAfter, 10);
-          } else if (rateLimitReset > 0) {
-            // X-Rate-Limit-Resetヘッダーを使用（リセットまでの秒数）
-            waitSeconds = rateLimitReset;
-          } else {
-            // デフォルトで60秒待機
-            waitSeconds = 60;
-          }
-
-          // 待機時間を追加してリトライ
           await new Promise((resolve) =>
-            setTimeout(resolve, waitSeconds * 1000)
+            setTimeout(resolve, actualWaitSeconds * 1000)
           );
-          continue;
+
+          // リトライ
+          return fetchPosts(cursor, retryCount + 1);
         }
 
-        throw new Error(
-          `Product Hunt API error: ${productHuntResponse.statusText}`
-        );
+        throw new Error(`Product Hunt API error: ${response.statusText}`);
       }
 
+      return response;
+    };
+
+    // ページネーションで全件取得
+    const allPosts: ProductHuntResponse["data"]["posts"]["edges"] = [];
+    let hasNextPage = true;
+    let cursor: string | null = null;
+    const maxPages = 10; // 最大10ページ（200件）まで取得
+
+    for (let page = 0; page < maxPages && hasNextPage; page++) {
+      const productHuntResponse = await fetchPosts(cursor);
       const productHuntData =
         (await productHuntResponse.json()) as PostsQueryResponse;
 
@@ -176,79 +157,24 @@ export async function POST(request: Request) {
       }
 
       const posts = productHuntData.data?.posts?.edges || [];
-      // 取得したページ内で日付範囲に入る投稿のみ収集
-      for (const edge of posts) {
-        const post = edge?.node;
-        if (!post?.featuredAt) continue;
-        const featuredDate = new Date(post.featuredAt);
-        if (featuredDate >= dateStart && featuredDate <= dateEnd) {
-          filteredPosts.push(edge);
-        }
-      }
+      allPosts.push(...posts);
 
-      // ページネーション情報を更新
-      hasNextPage =
-        productHuntData.data?.posts?.pageInfo?.hasNextPage || false;
+      hasNextPage = productHuntData.data?.posts?.pageInfo?.hasNextPage || false;
       cursor = productHuntData.data?.posts?.pageInfo?.endCursor || null;
 
-      // 無限ループを防ぐため、十分なデータが取得できた場合は終了
-      // または、選択された日付より前のデータが来たら終了（日付が降順の場合）
       if (posts.length === 0) {
         break;
       }
 
-      // featuredAt の並びが降順っぽい場合のみ、対象日より古いページに到達したら早期終了
-      let firstFeaturedAtMs: number | null = null;
-      let lastFeaturedAtMs: number | null = null;
-      for (let i = 0; i < posts.length; i++) {
-        const featuredAt = posts[i]?.node?.featuredAt;
-        if (!featuredAt) continue;
-        const ms = Date.parse(featuredAt);
-        if (Number.isNaN(ms)) continue;
-        if (firstFeaturedAtMs === null) firstFeaturedAtMs = ms;
-        lastFeaturedAtMs = ms;
-      }
-      const orderingLooksDesc =
-        firstFeaturedAtMs !== null &&
-        lastFeaturedAtMs !== null &&
-        firstFeaturedAtMs >= lastFeaturedAtMs;
-      if (orderingLooksDesc && lastFeaturedAtMs !== null) {
-        if (lastFeaturedAtMs < dateStart.getTime()) {
-          olderPageStreak++;
-        } else {
-          olderPageStreak = 0;
-        }
-        if (olderPageStreak >= maxOlderPagesBeforeStop) {
-          break;
-        }
-      } else {
-        olderPageStreak = 0;
-      }
-
-      // レート制限に基づいて動的に待機時間を調整（固定1秒待機を撤廃）
+      // 次のページ取得前に短い待機（レートリミット対策）
       if (hasNextPage) {
-        const remainingPercentage =
-          rateLimitLimit > 0 ? (rateLimitRemaining / rateLimitLimit) * 100 : 0;
-        let waitMs = 0;
-
-        if (remainingPercentage <= 5) {
-          waitMs = rateLimitReset > 0 ? rateLimitReset * 1000 : 900000;
-        } else if (remainingPercentage <= 10) {
-          waitMs = 5000;
-        } else if (remainingPercentage <= 20) {
-          waitMs = 2000;
-        } else {
-          // クォータが十分な場合は最小限（マナーとしてごく短い待機）
-          waitMs = 150;
-        }
-
-        if (waitMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, waitMs));
-        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
       }
     }
 
-    if (filteredPosts.length === 0) {
+    const posts = allPosts;
+
+    if (posts.length === 0) {
       return NextResponse.json(
         {
           error: `選択された日付（${selectedDate}）の投稿が見つかりませんでした`,
@@ -256,6 +182,8 @@ export async function POST(request: Request) {
         { status: 404 }
       );
     }
+
+    console.log(`合計取得した投稿数: ${posts.length}件`);
 
     // ヘッダー行を準備
     const headers = [
@@ -270,7 +198,7 @@ export async function POST(request: Request) {
     ];
 
     // データ行を準備
-    const rows = filteredPosts.map((edge) => {
+    const rows = posts.map((edge) => {
       const post = edge.node;
       const makers = post.makers
         .map((maker: ProductHuntMaker) => maker.name)
