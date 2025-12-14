@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { generateText } from "ai";
+import { openai } from "@ai-sdk/openai";
 import type {
   ProductHuntResponse,
   ProductHuntMaker,
@@ -50,6 +52,46 @@ function escapeCsvValue(value: string): string {
     return `"${value.replace(/"/g, '""')}"`;
   }
   return value;
+}
+
+// コールドメール生成関数
+async function generateColdEmail(
+  name: string,
+  description: string
+): Promise<string> {
+  const emailTemplate = `I saw {SaaS} on Product Hunt—congrats on the launch!
+I especially liked {specific point} and bookmarked it right away :)
+
+Right after launch, it can be surprisingly effective to increase the number of entry points for organic search traffic. I'm building a SaaS that lets you paste a URL and automatically generate and publish a site for a related free tool (e.g., a free ROI calculator).
+
+It's currently in closed beta, and I'm iterating based on feedback from a small group of SaaS founders.
+
+Would it be okay if I send you an invite link for the beta test? (A simple "OK" or "No" is totally fine.)
+
+Best,
+Yusei`;
+
+  try {
+    const { text } = await generateText({
+      model: openai("gpt-5-nano"),
+      prompt: `You are generating a personalized cold email based on a Product Hunt listing.
+
+Product name: ${name}
+Product description: ${description}
+
+Use the following email template. Replace {SaaS} with the product name and {specific point} with a specific, natural, and human-like point from the description that flows naturally with the context. Keep all other parts of the template exactly as they are.
+
+Email template:
+${emailTemplate}
+
+Generate the complete email with {SaaS} and {specific point} replaced appropriately. The {specific point} should be a natural, conversational phrase that fits seamlessly into the sentence.`,
+    });
+
+    return text;
+  } catch (error) {
+    console.error("Error generating cold email:", error);
+    throw error;
+  }
 }
 
 export async function POST(request: Request) {
@@ -192,24 +234,50 @@ export async function POST(request: Request) {
       "content",
     ];
 
-    // データ行を準備
-    const rows = posts.map((edge) => {
-      const post = edge.node;
-      const makers = post.makers
-        .map((maker: ProductHuntMaker) => maker.name)
-        .join(", ");
+    // OpenAI APIキーの確認
+    const openaiApiKey = process.env.OPENAI_API_KEY;
+    if (!openaiApiKey) {
+      console.warn(
+        "OPENAI_API_KEY is not configured. Cold emails will not be generated."
+      );
+    }
 
-      return [
-        post.name || "",
-        post.tagline || "",
-        post.url || "",
-        makers || "",
-        post.description || "",
-        post.website || "",
-        post.votesCount?.toString() || "0",
-        "", // content - 後のAI処理で使用するため空で保持
-      ];
-    });
+    // データ行を準備（コールドメール生成を含む）
+    const rows = await Promise.all(
+      posts.map(async (edge) => {
+        const post = edge.node;
+        const makers = post.makers
+          .map((maker: ProductHuntMaker) => maker.name)
+          .join(", ");
+
+        let content = "";
+        // nameとdescriptionが存在する場合のみコールドメールを生成
+        if (openaiApiKey && post.name && post.description) {
+          try {
+            content = await generateColdEmail(post.name, post.description);
+            // レートリミット対策：リクエスト間に待機時間を設ける
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          } catch (error) {
+            console.error(
+              `Error generating cold email for ${post.name}:`,
+              error
+            );
+            content = `Error: Failed to generate cold email`;
+          }
+        }
+
+        return [
+          post.name || "",
+          post.tagline || "",
+          post.url || "",
+          makers || "",
+          post.description || "",
+          post.website || "",
+          post.votesCount?.toString() || "0",
+          content,
+        ];
+      })
+    );
 
     // CSV形式の文字列を生成
     const csvRows = [

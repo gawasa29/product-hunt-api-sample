@@ -20,9 +20,9 @@ export default function Home() {
     setExportError(null);
 
     try {
-      // タイムアウトを60秒に設定
+      // タイムアウトを5分に設定（コールドメール生成に時間がかかるため）
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), 300000);
 
       const response = await fetch("/api/export-to-csv", {
         method: "POST",

@@ -19,6 +19,9 @@ pnpm install
 ```env
 # Product Hunt API
 PRODUCT_HUNT_ACCESS_TOKEN=your_product_hunt_access_token_here
+
+# OpenAI API (for cold email generation)
+OPENAI_API_KEY=your_openai_api_key_here
 ```
 
 #### Product Hunt API アクセストークンの取得方法
